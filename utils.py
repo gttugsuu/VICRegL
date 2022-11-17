@@ -23,7 +23,7 @@ def round_log(key, log, item=True, iters=1):
 
 
 def checkpoint(args, epoch, step, model, optimizer, name=""):
-    if args.rank != 0 or epoch % args.checkpoint_freq != 0:
+    if epoch % args.checkpoint_freq != 0:
         return
     state = dict(
         epoch=epoch, model=model.state_dict(), optimizer=optimizer.state_dict()
@@ -69,30 +69,6 @@ def off_diagonal(x):
     return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
 
-class FullGatherLayer(torch.autograd.Function):
-    """
-    Gather tensors from all process and support backward propagation
-    for the gradients across processes.
-    """
-
-    @staticmethod
-    def forward(ctx, x):
-        output = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
-        dist.all_gather(output, x)
-        return tuple(output)
-
-    @staticmethod
-    def backward(ctx, *grads):
-        all_gradients = torch.stack(grads)
-        dist.all_reduce(all_gradients)
-        return all_gradients[dist.get_rank()]
-
-
-def batch_all_gather(x):
-    x_list = FullGatherLayer.apply(x.contiguous())
-    return torch.cat(x_list, dim=0)
-
-
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
     with torch.no_grad():
@@ -111,7 +87,6 @@ def accuracy(output, target, topk=(1,)):
 
 
 def gather_center(x):
-    x = batch_all_gather(x)
     x = x - x.mean(dim=0)
     return x
 

@@ -120,7 +120,7 @@ class RandomResizedCropWithLocation(torch.nn.Module):
             tuple: params (i, j, h, w) to be passed to ``crop`` for a random
                 sized crop.
         """
-        width, height = FT._get_image_size(img)
+        width, height = FT.get_image_size(img)
         area = height * width
 
         log_ratio = torch.log(torch.tensor(ratio))
@@ -304,9 +304,11 @@ class MultiCropTrainDataTransform(object):
                         [
                             get_color_distortion(left=(j % 2 == 0)),
                             transforms.ToTensor(),
-                            transforms.Normalize(
-                                mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225],
-                            ),
+                            # transforms.Lambda(lambda x: x.repeat(3, 1, 1) ),
+                            # transforms.Normalize(
+                            #     mean = [0.1307, 0.1307, 0.1307], std=[0.3081, 0.3081, 0.3081]
+                            # ), # mnist mean, std
+                            transforms.Normalize((0.168, 0.137, 0.096), (0.175, 0.159, 0.168)), # bbbc021 mean, std
                         ]
                     )
                 )
@@ -349,9 +351,11 @@ class MultiCropValDataTransform(MultiCropTrainDataTransform):
                 transforms.Resize(full_size, interpolation=InterpolationMode.BICUBIC),
                 transforms.CenterCrop(self.size_crops[0]),
                 transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]
-                ),
+                # transforms.Lambda(lambda x: x.repeat(3, 1, 1) ),
+                # transforms.Normalize(
+                #     mean = [0.1307, 0.1307, 0.1307], std=[0.3081, 0.3081, 0.3081]
+                # ),
+                transforms.Normalize((0.168, 0.137, 0.096), (0.175, 0.159, 0.168)), # bbbc021 mean, std
             ]
         )
 

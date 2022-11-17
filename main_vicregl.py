@@ -22,7 +22,6 @@ from torch import nn
 
 from datasets import build_loader
 from optimizers import build_optimizer
-from distributed import init_distributed_mode
 import utils
 
 
@@ -30,12 +29,12 @@ def get_arguments():
     parser = argparse.ArgumentParser(description="Pretraining with VICRegL", add_help=False)
 
     # Checkpoints and Logs
-    parser.add_argument("--exp-dir", type=Path, required=True)
+    parser.add_argument("--exp-dir", type=Path, default='../output/bbbc021/')
     parser.add_argument("--log-tensors-interval", type=int, default=60)
     parser.add_argument("--checkpoint-freq", type=int, default=1)
 
     # Data
-    parser.add_argument("--dataset", type=str, default="imagenet1k")
+    parser.add_argument("--dataset", type=str, default="bbbc021", help="mnist or imagenet1k")
     parser.add_argument("--dataset_from_numpy", action="store_true")
     parser.add_argument("--size-crops", type=int, nargs="+", default=[224, 96])
     parser.add_argument("--num-crops", type=int, nargs="+", default=[2, 6])
@@ -47,7 +46,7 @@ def get_arguments():
     parser.add_argument("--arch", type=str, default="convnext_small")
     parser.add_argument("--drop-path-rate", type=float, default=0.1)
     parser.add_argument("--layer-scale-init-value", type=float, default=0.0)
-    parser.add_argument("--mlp", default="8192-8192-8192")
+    parser.add_argument("--mlp", default="1024-1024-1024", help="default is 8192-8192-8192")
     parser.add_argument("--maps-mlp", default="512-512-512")
 
     # Loss Function
@@ -68,7 +67,7 @@ def get_arguments():
     # Optimization
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--warmup-epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--batch-size", type=int, default=10)
     parser.add_argument("--optimizer", default="adamw")
     parser.add_argument("--base-lr", type=float, default=0.0005)
     parser.add_argument("--end-lr-ratio", type=float, default=0.001)
@@ -84,47 +83,34 @@ def get_arguments():
     # Running
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--num-workers", type=int, default=10)
-    parser.add_argument('--device', default='cuda',
+    parser.add_argument('--device', default='cuda:0',
                         help='device to use for training / testing')
-
-    # Distributed
-    parser.add_argument('--world-size', default=1, type=int,
-                        help='number of distributed processes')
-    parser.add_argument('--local_rank', default=-1, type=int)
-    parser.add_argument('--dist-url', default='env://',
-                        help='url used to set up distributed training')
 
     return parser
 
 
 def main(args):
     torch.backends.cudnn.benchmark = True
-    init_distributed_mode(args)
     print(args)
     gpu = torch.device(args.device)
 
-    if args.rank == 0:
-        args.exp_dir.mkdir(parents=True, exist_ok=True)
-        stats_file = open(args.exp_dir / "stats.txt", "a", buffering=1)
-        dir = os.getcwd().split("/")[-1]
-        print(" ".join([dir] + sys.argv))
-        print(" ".join([dir] + sys.argv), file=stats_file)
+    args.exp_dir.mkdir(parents=True, exist_ok=True)
+    stats_file = open(args.exp_dir / "stats.txt", "a", buffering=1)
+    dir = os.getcwd().split("/")[-1]
+    print(" ".join([dir] + sys.argv))
+    print(" ".join([dir] + sys.argv), file=stats_file)
 
-    # args.stats_file = stats_file
-
-    train_loader, train_sampler = build_loader(args, is_train=True)
+    train_loader = build_loader(args, is_train=True)
     if args.evaluate:
-        val_loader, _ = build_loader(args, is_train=False)
+        val_loader = build_loader(args, is_train=False)
 
     model = VICRegL(args).cuda(gpu)
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
 
     optimizer = build_optimizer(args, model)
 
     if (args.exp_dir / "model.pth").is_file():
-        if args.rank == 0:
-            print("resuming from checkpoint")
+        print("resuming from checkpoint")
         ckpt = torch.load(args.exp_dir / "model.pth", map_location="cpu")
         start_epoch = ckpt["epoch"]
         model.load_state_dict(ckpt["model"])
@@ -140,7 +126,6 @@ def main(args):
     scaler = torch.cuda.amp.GradScaler()
     for epoch in range(start_epoch, args.epochs):
         model.train()
-        train_sampler.set_epoch(epoch)
         for step, inputs in enumerate(train_loader, start=epoch * len(train_loader)):
             lr = utils.learning_schedule(
                 global_step=step,
@@ -148,9 +133,7 @@ def main(args):
                 base_lr=args.base_lr,
                 end_lr_ratio=args.end_lr_ratio,
                 total_steps=args.epochs * len(train_loader.dataset) // args.batch_size,
-                warmup_steps=args.warmup_epochs
-                * len(train_loader.dataset)
-                // args.batch_size,
+                warmup_steps=args.warmup_epochs * len(train_loader.dataset) // args.batch_size,
             )
             for g in optimizer.param_groups:
                 if "__MAPS_TOKEN__" in g.keys():
@@ -171,13 +154,10 @@ def main(args):
                 optimizer.step()
 
             # logging
-            for v in logs.values():
-                torch.distributed.reduce(v.div_(args.world_size), 0)
+            # for v in logs.values():
+            #     torch.distributed.reduce(v.div_(args.world_size), 0)
             current_time = time.time()
-            if (
-                args.rank == 0
-                and current_time - last_logging > args.log_tensors_interval
-            ):
+            if current_time - last_logging > args.log_tensors_interval:
                 logs = {key: utils.round_log(key, value) for key, value in logs.items()}
                 stats = dict(
                     ep=epoch,
@@ -196,7 +176,6 @@ def main(args):
             if args.evaluate:
                 evaluate(model, logs, val_loader, args, epoch, lr, stats_file, gpu)
 
-
 def evaluate(model, logs, val_loader, args, epoch, lr, stats_file, gpu):
     model.eval()
 
@@ -211,21 +190,20 @@ def evaluate(model, logs, val_loader, args, epoch, lr, stats_file, gpu):
                 loss, logs = model.forward(make_inputs(inputs, gpu), is_val=True)
 
         # logging
-        for v in logs.values():
-            torch.distributed.reduce(v.div_(args.world_size), 0)
+        # for v in logs.values():
+        #     torch.distributed.reduce(v.div_(args.world_size), 0)
         for key, value in logs.items():
             cumulative_logs[key] += value.item()
         iters += 1
 
-    if args.rank == 0:
-        stats = dict(ep=epoch, lr=lr)
-        cumulative_logs = {
-            key: utils.round_log(key, value, item=False, iters=iters)
-            for key, value in cumulative_logs.items()
-        }
-        stats.update(cumulative_logs)
-        print("Val: ", json.dumps(stats))
-        print("Val: ", json.dumps(stats), file=stats_file)
+    stats = dict(ep=epoch, lr=lr)
+    cumulative_logs = {
+        key: utils.round_log(key, value, item=False, iters=iters)
+        for key, value in cumulative_logs.items()
+    }
+    stats.update(cumulative_logs)
+    print("Val: ", json.dumps(stats))
+    print("Val: ", json.dumps(stats), file=stats_file)
 
 
 def make_inputs(inputs, gpu):
@@ -424,7 +402,7 @@ class VICRegL(nn.Module):
         cov_loss = 0.0
         iter_ = 0
         for i in range(num_views):
-            x = utils.gather_center(embedding[i])
+            x = embedding[i]
             std_x = torch.sqrt(x.var(dim=0) + 0.0001)
             var_loss = var_loss + torch.mean(torch.relu(1.0 - std_x))
             cov_x = (x.T @ x) / (x.size(0) - 1)
@@ -448,8 +426,10 @@ class VICRegL(nn.Module):
             x = F.normalize(x, p=2, dim=1)
             return torch.mean(x.std(dim=0))
 
-        representation = utils.batch_all_gather(outputs["representation"][0])
-        embedding = utils.batch_all_gather(outputs["embedding"][0])
+        # representation = utils.batch_all_gather(outputs["representation"][0])
+        # embedding = utils.batch_all_gather(outputs["embedding"][0])
+        representation = outputs["representation"][0]
+        embedding = outputs["embedding"][0]
 
         corr = correlation_metric(representation)
         core = correlation_metric(embedding)
@@ -527,18 +507,15 @@ class VICRegL(nn.Module):
         # Online classification
 
         labels = inputs["labels"]
-        classif_loss = F.cross_entropy(outputs["logits"][0], labels)
-        acc1, acc5 = utils.accuracy(outputs["logits"][0], labels, topk=(1, 5))
-        loss = loss + classif_loss
-        logs.update(dict(cls_l=classif_loss, top1=acc1, top5=acc5, l=loss))
-        if is_val:
-            classif_loss_val = F.cross_entropy(outputs["logits_val"][0], labels)
-            acc1_val, acc5_val = utils.accuracy(
-                outputs["logits_val"][0], labels, topk=(1, 5)
-            )
-            logs.update(
-                dict(clsl_val=classif_loss_val, top1_val=acc1_val, top5_val=acc5_val,)
-            )
+        # classif_loss = F.cross_entropy(outputs["logits"][0], labels)
+        # acc1, acc5 = utils.accuracy(outputs["logits"][0], labels, topk=(1, 5))
+        # loss = loss + classif_loss
+        logs.update(dict(l=loss))
+        # logs.update(dict(cls_l=classif_loss, top1=acc1, top5=acc5, l=loss))
+        # if is_val:
+            # classif_loss_val = F.cross_entropy(outputs["logits_val"][0], labels)
+            # acc1_val, acc5_val = utils.accuracy(outputs["logits_val"][0], labels, topk=(1, 5))
+            # logs.update(dict(clsl_val=classif_loss_val, top1_val=acc1_val, top5_val=acc5_val,))
 
         return loss, logs
 

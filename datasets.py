@@ -9,6 +9,7 @@
 import os
 from PIL import Image
 import numpy as np
+import pandas as pd
 
 import torch
 from torch.utils.data import Dataset
@@ -47,6 +48,27 @@ class ImageNetNumpyDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+class bbbc021_splitbymoa_cell(Dataset):
+    def __init__(self, transform, cellsize=128, mode='train', train=True):
+        self.mode = mode
+        if self.mode == 'train':
+            if train:
+                self.metadata = pd.read_csv('/home/gantugs/working/dino_vgg_other/split_by_moa/meta_train.csv')
+            else:
+                self.metadata = pd.read_csv('/home/gantugs/working/dino_vgg_other/split_by_moa/meta_valid.csv')
+        elif self.mode == 'test':
+            self.metadata = pd.read_csv('/home/gantugs/working/dino_vgg_other/split_by_moa/meta_test.csv')
+            
+        self.transform = transform
+
+    def __len__(self):
+        return self.metadata.shape[0]
+
+    def __getitem__(self, i):
+        cellimagepath = self.metadata.cellimagepaths[i]
+        cellimage = Image.open(cellimagepath).convert('RGB')
+        cellimage = self.transform(cellimage)
+        return cellimage, i
 
 def build_loader(args, is_train=True):
     dataset = build_dataset(args, is_train)
@@ -54,23 +76,33 @@ def build_loader(args, is_train=True):
     batch_size = args.batch_size
     if (not is_train) and args.val_batch_size == -1:
         batch_size = args.batch_size
+        
+    sampler = torch.utils.data.RandomSampler(dataset, num_samples = 100)
 
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=is_train)
-    per_device_batch_size = batch_size // args.world_size
     loader = torch.utils.data.DataLoader(
         dataset,
-        sampler=sampler,
-        batch_size=per_device_batch_size,
+        shuffle=is_train,
+        # sampler=sampler,
+        batch_size=batch_size,
         num_workers=args.num_workers,
     )
 
-    return loader, sampler
+    return loader
 
 
 def build_dataset(args, is_train=True):
     transform = build_transform(args, is_train=is_train)
+    
+    if args.dataset == 'bbbc021':
+        args.num_classes = 0
+        dataset = bbbc021_splitbymoa_cell(train=is_train, transform=transform)
 
-    if args.dataset == "imagenet1k":
+    if args.dataset == "mnist":
+        args.num_classes = 10
+        dataset = datasets.MNIST(root='../data/', train=is_train, download=True, transform=transform)
+        
+        
+    elif args.dataset == "imagenet1k":
         args.num_classes = 1000
 
         if args.dataset_from_numpy:
@@ -86,6 +118,7 @@ def build_dataset(args, is_train=True):
             prefix = "train" if is_train else "val"
             path = os.path.join(root, "train")
             dataset = datasets.ImageFolder(path, transform)
+            
 
     return dataset
 

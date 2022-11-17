@@ -37,7 +37,7 @@ def get_arguments():
     )
 
     # Checkpoint
-    parser.add_argument("--pretrained", type=Path, help="path to pretrained model")
+    parser.add_argument("--pretrained", type=Path, default="../output/bbbc021/model.pth", help="path to pretrained model")
     parser.add_argument(
         "--exp-dir",
         default="./checkpoint/lincls/",
@@ -48,6 +48,8 @@ def get_arguments():
     parser.add_argument(
         "--print-freq", default=100, type=int, metavar="N", help="print frequency"
     )
+    parser.add_argument("--embedding_dir", type=Path, default="../output/bbbc021/embeddings/", help="Path to save embeddings")
+    parser.add_argument("--representation_dir", type=Path, default="../output/bbbc021/representations/", help="Path to save representations")
 
     # Model
     parser.add_argument("--arch", type=str, default="resnet50")
@@ -61,7 +63,7 @@ def get_arguments():
         help="number of total epochs to run",
     )
     parser.add_argument(
-        "--batch-size", default=256, type=int, metavar="N", help="mini-batch size"
+        "--batch-size", default=64, type=int, metavar="N", help="mini-batch size"
     )
     parser.add_argument(
         "--lr-backbone",
@@ -91,7 +93,7 @@ def get_arguments():
     # Running
     parser.add_argument(
         "--workers",
-        default=8,
+        default=0,
         type=int,
         metavar="N",
         help="number of data loader workers",
@@ -115,6 +117,7 @@ def main():
     args.rank = 0
     args.dist_url = f"tcp://localhost:{random.randrange(49152, 65535)}"
     args.world_size = args.ngpus_per_node
+    # args.world_size = 0
     torch.multiprocessing.spawn(main_worker, (args,), args.ngpus_per_node)
 
 
@@ -190,43 +193,67 @@ def main_worker(gpu, args):
         best_acc = argparse.Namespace(top1=0, top5=0)
 
     # Data loading code
-    traindir = args.data_dir / "train"
-    valdir = args.data_dir / "val"
+    # traindir = args.data_dir / "train"
+    # valdir = args.data_dir / "val"
     normalize = transforms.Normalize(
-        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        # mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225] # Imagenet
+        mean = [0.1307, 0.1307, 0.1307], std=[0.3081, 0.3081, 0.3081] # MNIST
     )
 
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        transforms.Compose(
-            [
-                transforms.RandomResizedCrop(224),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                normalize,
-            ]
-        ),
-    )
-    val_dataset = datasets.ImageFolder(
-        valdir,
-        transforms.Compose(
-            [
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                normalize,
-            ]
-        ),
-    )
-
-    if args.train_percent in {1, 10}:
-        train_dataset.samples = []
-        for fname in args.train_files:
-            fname = fname.decode().strip()
-            cls = fname.split("_")[0]
-            train_dataset.samples.append(
-                (traindir / cls / fname, train_dataset.class_to_idx[cls])
-            )
+    # train_dataset = datasets.ImageFolder(
+    #     traindir,
+    #     transforms.Compose(
+    #         [
+    #             transforms.RandomResizedCrop(224),
+    #             transforms.RandomHorizontalFlip(),
+    #             transforms.ToTensor(),
+    #             normalize,
+    #         ]
+    #     ),
+    # )
+    # val_dataset = datasets.ImageFolder(
+    #     valdir,
+    #     transforms.Compose(
+    #         [
+    #             transforms.Resize(256),
+    #             transforms.CenterCrop(224),
+    #             transforms.ToTensor(),
+    #             normalize,
+    #         ]
+    #     ),
+    # )
+    
+    train_dataset = datasets.MNIST(root='../data/', train=True, download=True, 
+                                   transform=transforms.Compose(
+                                            [
+                                                transforms.RandomResizedCrop(224),
+                                                transforms.RandomHorizontalFlip(),
+                                                transforms.ToTensor(),
+                                                transforms.Lambda(lambda x: x.repeat(3, 1, 1) ),
+                                                normalize,
+                                            ]
+                                        )
+                                    )
+    
+    val_dataset = datasets.MNIST(root='../data/', train=False, download=True, 
+                                   transform=transforms.Compose(
+                                            [
+                                                transforms.Resize(256),
+                                                transforms.CenterCrop(224),
+                                                transforms.ToTensor(),
+                                                transforms.Lambda(lambda x: x.repeat(3, 1, 1) ),
+                                                normalize,
+                                            ]
+                                        )
+                                    )
+    # if args.train_percent in {1, 10}:
+    #     train_dataset.samples = []
+    #     for fname in args.train_files:
+    #         fname = fname.decode().strip()
+    #         cls = fname.split("_")[0]
+    #         train_dataset.samples.append(
+    #             (traindir / cls / fname, train_dataset.class_to_idx[cls])
+    #         )
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     kwargs = dict(
